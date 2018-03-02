@@ -294,3 +294,254 @@ function fn_myaddon_sample_hook_2(&$num) {
 フックはそのフックの開始時点から、次のフック、あるいは関数の終端までを乗っ取る挙動を示します。
 
 
+## 検索結果画面にproduct_codeとかカテゴリを表示するカスタマイズ
+
+<img src="images/検索結果画面のカスタマイズ01.jpg" alt="">
+
+デフォルトの検索結果画面には品番(product_code)が表示されないので、品番での検索がメインの我々にとって非常に使いにくいものになっている。
+
+以下、検索結果画面にproduct_codeを表示させるカスタマイズ。
+
+### カスタマイズ内容
+
+対象のソース
+
+    /design/themes/basic/templates/views/products/components/one_product.tpl
+
+追加コード
+
+```smarty
+{assign var="product_url" value="{"products.view?product_id=`$product.product_id`"|fn_url}"}
+{assign var="product_url_arr" value="/"|explode:$product_url}
+{assign var="product_url_count" value=$product_url_arr|@count-2}
+{assign var="product_url_category" value=$product_url_arr[3]}
+<!-- 表示 -->
+<small>{$product_url_category|upper} / {$product_url_arr[$product_url_count]|upper}</small>
+```
+
+URLを`/`でパースして分解、カウント末尾の値を取得して表示しています。
+おまけでカテゴリも表示しています。
+
+### なぜこのような回りくどい取り方をするのか
+
+`{debug}`で試すとわかりますが、デフォルトでは`product_code`はおろか、頼みの`seo_name`すら含まれていません。
+
+`product_code`あるいは`seo_name`を取得するためにはコアへの手入れが必須であるため、それを避けた結果がURLのパースです。
+
+URLという相対的なデータを元に重要な機能を実装するのはハイリスクなので、一応こうしてドキュメントだけ残しておきます。
+
+
+## CS-CART4でのCMS利用（任意HTMLの記述）について
+
+HTMLを記述する際の注意事項です。
+
+### WYSIWYGエディタについて
+
+CS-CARTでは以下の3種類からWYSIWYGエディタを選択できます。
+
+1. CKEditor
+2. Reductor
+3. TinyMCE
+
+CMS機能で任意のHTMLを記述する際、WYSIWYGエディタによっては記述したとおりにHTMLが保存されず、例えば勝手に`<br>`や`<p>`が差し込まれたり、値が空のタグが勝手に削除されたり、ヒドイときにはid属性が消えたりします。
+
+結論から言うと、上記3つの中で実用的なのはTinyMCEのみです。残りの2つは要素の削除と属性の削除が発生します。
+
+TinyMCEの場合でも以下の点に気をつける必要があります。
+
+値が空のタグは削除されることがあります。
+: 例えば`<i class="icon-home"></i>`など。
+
+タブ文字や要素の前後のスペースが全て削除されます。
+: 簡単に言うと整形が無くなります。
+
+また、以下のメリットがあります。
+
+scriptタグが使える
+: 記述したスクリプトタグはCDATA化され自動でbody下部に移動します。（超賢い）
+
+
+## 注文処理画面に本来の品番を出力する（コンビネーション運用時）
+
+コンビネーションコードにJANコードを入力する運用において、あらゆる箇所でプロダクト本来の品番が表示されず、コンビネーションコードが出力されてしまう問題を解決するために行った改修。
+
+### 経緯
+
+注文処理画面や、注文メール、納品書などのPDFで型番（品番）が表示されない。まずフロント側の大部分では`seo_name`の表示等によって回避していた問題だが、注文データからの紐付きにおいて品番がどうしても取れず、受発注などの運用に支障をきたすことが判明した。  
+（`var_dump`等であらゆる変数を出力したが、product_codeにはJANが設定されてしまっていた）
+
+クエリを追うと、そもそも品番を取得していないことが判明した。
+
+仕方なく品番を取得できるようにコアを改修することとなった。
+
+### コアの改修
+
+#### fn.cart.phpの修正
+
+function fn_get_order_info内
+
+```php
+$order['products'] = db_get_hash_array(
+    "SELECT ?:order_details.*, ?:product_descriptions.product, ?:products.status as product_status FROM ?:order_details "
+    . "LEFT JOIN ?:product_descriptions ON ?:order_details.product_id = ?:product_descriptions.product_id AND ?:product_descriptions.lang_code = ?s "
+    . "LEFT JOIN ?:products ON ?:order_details.product_id = ?:products.product_id "
+    . "WHERE ?:order_details.order_id = ?i ORDER BY ?:product_descriptions.product",
+    'item_id', $lang_code, $order_id
+);
+```
+
+↓↓↓
+
+```php
+$order['products'] = db_get_hash_array(
+    //"SELECT ?:order_details.*, ?:product_descriptions.product, ?:products.status as product_status FROM ?:order_details "
+    "SELECT ?:order_details.*, ?:product_descriptions.product, ?:products.status as product_status, ?:products.product_code as hinban FROM ?:order_details "
+    . "LEFT JOIN ?:product_descriptions ON ?:order_details.product_id = ?:product_descriptions.product_id AND ?:product_descriptions.lang_code = ?s "
+    . "LEFT JOIN ?:products ON ?:order_details.product_id = ?:products.product_id "
+    . "WHERE ?:order_details.order_id = ?i ORDER BY ?:product_descriptions.product",
+    'item_id', $lang_code, $order_id
+);
+```
+
+`products.product_code`をselectに含め、別名`hinban`とした。
+
+#### 問題発生
+
+`hinban`を取得できるようになったものの、あらゆる箇所（注文管理画面や注文確認書印刷など）で`hinban`の出力が求められるため、コアのあらゆる箇所に手入れが必要になった。
+
+これでは保守が現実的ではないため、他の手段を模索することにした。
+
+すぐに思いつくのは、既存のフィールドに`hinban`の文字列をリテラル連結してしまうことだ。
+
+例えば商品名(product)フィールドに含めてしまうなど。
+
+### 商品名の頭にhinbanをリテラル連結する
+
+fn.cart.php
+
+1868行目付近
+
+```php
+//$order['products'][$k]['product'] = fn_get_product_name($v['product_id'], $lang_code);
+$order['products'][$k]['product'] = $order['products'][$k]['hinban'] . ' - ' . $v['extra']['product'];
+```
+
+OK。事なきを得た。
+
+
+## CS-CARTのCSVエクスポート項目を増やす
+
+### 目的
+
+CS-CARTのコンビネーションCSVをエクスポートする時、`product_code`もレイアウトに含めたい。
+
+### 経緯
+
+在庫数やJANコードを更新するにはコンビネーションcsvをエクスポートし、値を書き換えたあとインポートするが、レコードのマッチングには品番(`product_code`)が必要だが上記CSVのレイアウトには含まれていない。（含まれているのは`product_id`）
+
+`product_code`を得るためには、コンビネーションcsvと商品情報csvをリレーションしなければならなかった。これが運用上ネックになっていた。
+
+### 方法
+
+    /schemas/exim/product_combinations.php
+
+上記ファイルでエクスポートのレイアウト情報が管理されていた。
+
+    'Product code' => array(
+        'required' => false,
+        'table' => 'products',
+        'db_field' => 'product_code'
+    ),
+
+上記コードを差し込むだけで希望の動作を得ることができた。
+
+
+## カテゴリー画面で品番からIDを得るスクリプト
+
+ショップの運用上、管理コード`product_code`と、CS-CARTでインクリメントされている`product_id`は異なるものになります。
+
+`product_code`の一覧から`product_id`を得るにはCSVをダウンロードするしか無いのですが、面倒なのでscriptで解決します。
+
+~~~js
+// 品番の配列
+var items = [
+'product_code1'
+,'product_code2'
+,'product_code3'
+,'product_code4'
+,'product_code1'
+,'product_code2'
+,'product_code3'
+,'product_code4'
+,'product_code5'
+,'product_code1'
+];
+var result = "";
+$.each(items, function(i,v){
+  var targetInput = $('.product-code input.input-hidden[value=' + items[i] + ']');
+  var targetAnchor = $(targetInput).parent().parent().find('.row-status');
+  result += $(targetAnchor).attr('href').split('product_id=')[1] + '\n';
+});
+// 出力結果をcombinations.csvのProduct ID列にコピペ
+console.log(result);
+~~~
+
+1. items変数に、idを得たいcodeを羅列して下さい。（重複OK）
+2. 上記scriptを、管理画面の商品一覧画面、コンソールで実行して下さい。（idは画面上に存在する商品しか取れません）
+3. 出力結果をコピーして下さい。
+
+### カテゴリー画面でポジション(並び順)を入力するスクリプト
+
+商品の並び順はカテゴリー毎に制御する必要があります。  
+CSVで管理できないのでインターフェースは管理画面か直接DBを叩くしかありません。
+
+管理画面のカテゴリー内商品一覧画面で、以下のscriptを発行すると手入力を省けます。
+
+~~~js
+// "品番":"並び順"のJSON
+var items = {
+"product_code1":"1",
+"product_code2":"2",
+"product_code3":"3",
+"product_code4":"4",
+"product_code5":"5"
+};
+$('.product-code .product-code-label').next('input').each(function(i,v){
+  var c = $(v).val();
+  if(c in items == true){
+    $(this).parent().parent().parent('tr').find('td:nth-child(2)').find('input.input-micro').val(items[c]);
+  } else {
+    console.log("失敗 : " + c);
+  }
+});
+~~~
+
+
+## CS-CARTの管理画面の商品一覧で、指定した品番だけチェックを入れるやつ
+
+以下のscriptを発行すると、任意の品番にチェックを入れられます。
+
+```js
+var targetCodeArr = [
+'product_code1'
+,'product_code2'
+,'product_code3'
+,'product_code4'
+,'product_code5'
+];
+var checkTargetCodes = function(){
+  console.log('比較開始');
+  var itemCount = 0;
+  for (var i=0;i<targetCodeArr.length;i++){
+    $('.product-code input').each(function(index,target){
+      var targetCode = $(target).val();
+      if(targetCode == targetCodeArr[i]){
+        $(target).parent().parent().parent().find('.left .checkbox').prop("checked",true);
+        console.log(targetCode);
+        itemCount++;
+      }
+    });
+  }
+  console.log('処理した品番数：' + itemCount + ' / ' + targetCodeArr.length);
+}();
+```
